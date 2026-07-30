@@ -1,9 +1,16 @@
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-# ... здесь твои остальные импорты (aiogram и т.д.) ...
+from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
+)
 
-# 1. Заглушка для веб-порта Render
+# 1. Заглушка веб-сервера для Render (чтобы бот не падал по таймауту)
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -14,240 +21,268 @@ def run_server():
     server = HTTPServer(('0.0.0.0', 10000), SimpleHandler)
     server.serve_forever()
 
-# Запускаем сервер в фоне
 threading.Thread(target=run_server, daemon=True).start()
 
-# 2. Дальше идет твой основной код бота (создание бота, диспетчера и dp.start_polling)
+# --- НАСТРОЙКИ БОТА ---
+TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # Вставь сюда свой токен от BotFather
+ADMIN_ID = 000000000  # Впиши сюда свой цифровой Telegram ID для получения уведомлений по голде
+ADMIN_USERNAME = "@topklamsmanager"  # Менеджер для связи
 
-import asyncio
-import logging
-import os
-import random
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+router = Router()
 
-ADMIN_ID = 8836199481
-ADMIN_USERNAME = "@topklamsmanager"
-
-BOT_TOKEN = "8968489810:AAHWVtnM3ehigxF40wJzHmn1hR8z-p-iCmE"
-GOLD_PRICE_PER_UNIT = 0.7  # 1 G = 0.7 ₽
-
-SKIN_PHOTO_ID = None
-START_PHOTO_ID = None
-
+# Курс и базы данных в памяти
+GOLD_PRICE_PER_UNIT = 0.5  # Примерный коэффициент для калькулятора (руб за 1 голду)
+user_balances = {}
 reviews_list = []
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-logging.basicConfig(level=logging.INFO)
-
-user_balances = {}
-
-
+# Состояния FSM
 class Form(StatesGroup):
     waiting_for_topup_rubles = State()
-    waiting_for_withdraw_gold = State()
-    waiting_for_withdraw_photo = State()
     waiting_for_calc_rubles = State()
     waiting_for_calc_gold = State()
-    waiting_for_admin_skin = State()
-    waiting_for_admin_start_photo = State()
-    waiting_for_review_comment = State()
-
+    waiting_for_skin_photo = State()
 
 # --- КЛАВИАТУРЫ ---
 
 def main_keyboard():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="💸 Пополнить")
-    builder.button(text="⭐ Вывести")
-    builder.button(text="👤 Профиль")
-    builder.button(text="🧮 Калькулятор")
-    builder.button(text="🛍️ Каталог")
-    builder.button(text="👨‍💻 Поддержка")
-    builder.button(text="ℹ️ О боте")
-    builder.button(text="🎯 Халява")
-    builder.button(text="🎮 Сменить игру")
-    builder.adjust(3, 3, 3)
-    return builder.as_markup(resize_keyboard=True)
-
-def calc_keyboard():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="💰 Посчитать ₽ в G")
-    builder.button(text="⭐ Посчитать G в ₽")
-    builder.button(text="🏠 Главное меню")
-    builder.adjust(2, 1)
-    return builder.as_markup(resize_keyboard=True)
+    kb = [
+        [types.KeyboardButton(text="🛍️ Каталог"), types.KeyboardButton(text="💸 Пополнить")],
+        [types.KeyboardButton(text="⭐ Вывести"), types.KeyboardButton(text="🧮 Калькулятор")],
+        [types.KeyboardButton(text="ℹ️ О боте"), types.KeyboardButton(text="👨‍💻 Поддержка")],
+        [types.KeyboardButton(text="🎯 Халява"), types.KeyboardButton(text="🎮 Сменить игру")]
+    ]
+    return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def cancel_inline_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🏠 Главное меню", callback_data="go_main_menu")
     return builder.as_markup()
 
-def rating_inline_keyboard():
+def calc_keyboard():
+    kb = [
+        [types.KeyboardButton(text="💰 Посчитать ₽ в G"), types.KeyboardButton(text="⭐ Посчитать G в ₽")],
+        [types.KeyboardButton(text="🏠 Главное меню")]
+    ]
+    return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+# Список товаров и цен со скриншота
+PRODUCTS = {
+    "pos_10": {"name": "💎 Чек позиций на 10 секунд", "rub": 50, "gold": 100},
+    "klams_2": {"name": "💎 Кламси на 2 секунды", "rub": 70, "gold": 140},
+    "pos_16": {"name": "💎 Чек позиций 16 секунд", "rub": 50, "gold": 75},
+    "klams_15": {"name": "💎 Кламси 1.5 секунд", "rub": 70, "gold": 140},
+    "pos_200": {"name": "💎 Чек позиций 200 секунд", "rub": 110, "gold": 225},
+    "klams_13": {"name": "💎 Кламси 1.3 секунд", "rub": 65, "gold": 130},
+    "pack_1": {"name": "✨ Пак: Кламси 1.3 сек + чек позиций 200 сек", "rub": 140, "gold": 300},
+    "pack_2": {"name": "✨ Пак: Кламси 1.5 сек + чек позиций 10 сек", "rub": 100, "gold": 200},
+}
+
+
+# --- СТАРТ И ГЛАВНОЕ МЕНЮ ---
+
+@router.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "⚡ <b>Добро пожаловать в Topklams shop!</b>\n\nВыберите нужный раздел в меню ниже:",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+@router.callback_query(F.data == "go_main_menu")
+async def go_main_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("🏠 Вы вернулись в главное меню:", reply_markup=main_keyboard())
+    await callback.answer()
+
+@router.message(F.text == "🏠 Главное меню")
+async def go_main_menu_text(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🏠 Главное меню:", reply_markup=main_keyboard())
+
+
+# --- 🛍️ КАТАЛОГ И ПОКУПКА ---
+
+@router.message(F.text == "🛍️ Каталог")
+async def catalog_handler(message: types.Message, state: FSMContext):
+    await state.clear()
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐ 1", callback_data="rate_1")
-    builder.button(text="⭐ 2", callback_data="rate_2")
-    builder.button(text="⭐ 3", callback_data="rate_3")
-    builder.button(text="⭐ 4", callback_data="rate_4")
-    builder.button(text="⭐ 5", callback_data="rate_5")
-    builder.button(text="Пропустить ❌", callback_data="rate_skip")
-    builder.adjust(5, 1)
-    return builder.as_markup()
+    for key, item in PRODUCTS.items():
+        builder.button(text=f"{item['name']} — {item['rub']}₽ / {item['gold']}г", callback_data=f"select_{key}")
+    builder.button(text="🏠 Главное меню", callback_data="go_main_menu")
+    builder.adjust(1)
+    
+    await message.answer(
+        "📦 <b>Каталог товаров Top Klams:</b>\n\nВыберите интересующую вас позицию:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
 
-
-# --- НАСТРОЙКИ АДМИНА ---
-
-@dp.message(Command("setskin"))
-async def set_skin_command(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ У вас нет прав для этой команды.")
+@router.callback_query(F.data.startswith("select_"))
+async def process_select_product(callback: CallbackQuery):
+    product_key = callback.data.split("_", 1)[1]
+    item = PRODUCTS.get(product_key)
+    
+    if not item:
+        await callback.answer("Товар не найден!")
         return
-
-    await state.set_state(Form.waiting_for_admin_skin)
-    await message.answer(
-        "📸 **Админ, отправь фото скина UMP45 Arid!**",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Form.waiting_for_admin_skin, F.photo)
-async def process_admin_skin_photo(message: types.Message, state: FSMContext):
-    global SKIN_PHOTO_ID
-    SKIN_PHOTO_ID = message.photo[-1].file_id
-    await state.clear()
-    await message.answer("✅ **Картинка скина успешно сохранена!**", parse_mode="Markdown")
-
-
-@dp.message(Command("setstartphoto"))
-async def set_start_photo_command(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ У вас нет прав для этой команды.")
-        return
-
-    await state.set_state(Form.waiting_for_admin_start_photo)
-    await message.answer(
-        "📸 **Админ, отправь фото для команды /start!**",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Form.waiting_for_admin_start_photo, F.photo)
-async def process_admin_start_photo(message: types.Message, state: FSMContext):
-    global START_PHOTO_ID
-    START_PHOTO_ID = message.photo[-1].file_id
-    await state.clear()
-    await message.answer("✅ **Приветственное фото сохранено!**", parse_mode="Markdown")
-
-
-# --- ОБРАБОТКА /START И МЕНЮ ---
-
-@dp.message(Command("start"))
-async def start_command_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-    if user_id not in user_balances:
-        user_balances[user_id] = 0.0
-
-    start_caption = (
-        "<b>Что умеет этот бот?</b>\n\n"
-        "Приветствуем тебя в нашем боте 👋\n\n"
-        "Здесь ты сможешь честно и выгодно купить донат\n\n"
-        "Наши отзывы - @topklams_otz"
-    )
-
-    if START_PHOTO_ID:
-        try:
-            await message.answer_photo(
-                photo=START_PHOTO_ID,
-                caption=start_caption,
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.error(f"Ошибка отправки фото start: {e}")
-            await message.answer(start_caption, parse_mode="HTML")
-    else:
-        await message.answer(start_caption, parse_mode="HTML")
-
-    await message.answer(
-        "🏠 <b>Главное меню</b>\n"
-        "Для взаимодействия с ботом используй клавиатуру\n\n"
-        "Если у вас возникли вопросы обращайтесь в поддержку 📝",
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💳 Рубли ({item['rub']} ₽)", callback_data=f"pay_rub_{product_key}")
+    builder.button(text=f"🟡 Голда ({item['gold']} G)", callback_data=f"pay_gold_{product_key}")
+    builder.button(text="⬅️ Назад в каталог", callback_data="back_to_catalog")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"📦 <b>{item['name']}</b>\n\n"
+        f"💰 <b>Стоимость:</b>\n"
+        f"• {item['rub']} рублей\n"
+        f"• {item['gold']} голды\n\n"
+        f"Выберите удобный способ оплаты:",
         parse_mode="HTML",
-        reply_markup=main_keyboard()
-    )
-
-
-@dp.message(F.text == "🏠 Главное меню")
-async def start_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "🏠 <b>Главное меню</b>\n"
-        "Для взаимодействия с ботом используй клавиатуру\n\n"
-        "Если у вас возникли вопросы обращайтесь в поддержку 📝",
-        parse_mode="HTML",
-        reply_markup=main_keyboard()
-    )
-
-@dp.callback_query(F.data == "go_main_menu")
-async def process_main_menu_inline(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-        
-    await callback.message.answer(
-        "🏠 <b>Главное меню</b>\n"
-        "Для взаимодействия с ботом используй клавиатуру\n\n"
-        "Если у вас возникли вопросы обращайтесь в поддержку 📝",
-        parse_mode="HTML",
-        reply_markup=main_keyboard()
+        reply_markup=builder.as_markup()
     )
     await callback.answer()
 
-
-# --- 👤 ПРОФИЛЬ ---
-
-@dp.message(F.text == "👤 Профиль")
-async def profile_handler(message: types.Message, state: FSMContext):
+@router.callback_query(F.data == "back_to_catalog")
+async def back_to_catalog(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    user_id = message.from_user.id
-    balance = user_balances.get(user_id, 0.0)
-    await message.answer(
-        f"👤 <b>Ваш профиль:</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"👤 Имя: {message.from_user.first_name}\n"
-        f"💰 Ваш баланс: <b>{balance:.2f} G</b>",
+    builder = InlineKeyboardBuilder()
+    for key, item in PRODUCTS.items():
+        builder.button(text=f"{item['name']} — {item['rub']}₽ / {item['gold']}г", callback_data=f"select_{key}")
+    builder.button(text="🏠 Главное меню", callback_data="go_main_menu")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        "📦 <b>Каталог товаров Top Klams:</b>\n\nВыберите интересующую вас позицию:",
         parse_mode="HTML",
-        reply_markup=cancel_inline_keyboard()
-  )
-          # --- 💸 ПОПОЛНЕНИЕ ---
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
 
-@dp.message(F.text == "💸 Пополнить")
+# Оплата голдой (запрос на отправку скина админом)
+@router.callback_query(F.data.startswith("pay_gold_"))
+async def pay_gold_handler(callback: CallbackQuery, state: FSMContext):
+    product_key = callback.data.split("_", 2)[2]
+    item = PRODUCTS.get(product_key)
+    user = callback.from_user
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🛍️ В каталог", callback_data="back_to_catalog")
+    
+    await callback.message.edit_text(
+        f"🟡 Вы выбрали оплату голдой за <b>{item['name']}</b> ({item['gold']} G).\n\n"
+        f"⏳ Заявка отправлена менеджеру. Скоро вам пришлют скриншот скина для покупки.\n"
+        f"Связь с менеджером: {ADMIN_USERNAME}",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+    
+    if ADMIN_ID != 0:
+        admin_text = (
+            f"🔔 <b>Новый заказ за голду!</b>\n\n"
+            f"👤 Покупатель: @{user.username or 'нет юзернейма'} (ID: <code>{user.id}</code>)\n"
+            f"📦 Товар: {item['name']} — <b>{item['gold']} G</b>"
+        )
+        admin_builder = InlineKeyboardBuilder()
+        admin_builder.button(text="📸 Прислать фото скина покупателю", callback_data=f"send_skin_{user.id}_{item['gold']}g")
+        
+        await bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_builder.as_markup())
+    
+    await callback.answer()
+
+# Админ нажимает кнопку прикрепить фото скина
+@router.callback_query(F.data.startswith("send_skin_"))
+async def admin_start_send_skin(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    buyer_id = parts[2]
+    gold_amount = parts[3]
+    
+    await state.update_data(buyer_id=int(buyer_id), gold_amount=gold_amount)
+    await state.set_state(Form.waiting_for_skin_photo)
+    
+    await callback.message.answer("📸 Отправьте **фотографию скина** (картинкой), который покупатель должен выставить на рынок для оплаты голдой:")
+    await callback.answer()
+
+# Админ отправляет фото — бот пересылает покупателю
+@router.message(Form.waiting_for_skin_photo, F.photo)
+async def admin_send_skin_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    buyer_id = data.get("buyer_id")
+    gold_amount = data.get("gold_amount")
+    photo = message.photo[-1].file_id
+    
+    try:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="👨‍💻 Написать менеджеру", url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")
+        
+        await bot.send_photo(
+            chat_id=buyer_id,
+            photo=photo,
+            caption=(
+                f"📸 <b>Менеджер прислал скин для покупки!</b>\n\n"
+                f"Выставите этот скин на рынок ровно за <b>{gold_amount}</b>, "
+                f"после чего отправьте скриншот успешной продажи менеджеру: {ADMIN_USERNAME}"
+            ),
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+        await message.answer("✅ Фото скина успешно отправлено покупателю!")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить фото покупателю: {e}")
+    
+    await state.clear()
+
+# Оплата рублями (Инвойс Telegram Payments)
+@router.callback_query(F.data.startswith("pay_rub_"))
+async def pay_rub_handler(callback: CallbackQuery):
+    product_key = callback.data.split("_", 2)[2]
+    item = PRODUCTS.get(product_key)
+    
+    price_in_kopecks = item['rub'] * 100
+    
+    await callback.message.answer_invoice(
+        title=item['name'],
+        description=f"Покупка позиции {item['name']} в боте Top Klams",
+        payload=f"buy_{product_key}",
+        provider_token="",  # Укажите токен провайдера, если подключена реальная оплата
+        currency="RUB",
+        prices=[LabeledPrice(label=item['name'], amount=price_in_kopecks)]
+    )
+    await callback.answer()
+
+@router.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: types.Message):
+    await message.answer(
+        "✅ <b>Оплата прошла успешно!</b>\n\n"
+        f"Спасибо за покупку. Для получения товара отправьте скриншот чека менеджеру: {ADMIN_USERNAME}",
+        parse_mode="HTML"
+    )
+
+
+# --- 💸 ПОПОЛНИТЬ И БАЛАНС ---
+
+@router.message(F.text == "💸 Пополнить")
 async def topup_start(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(Form.waiting_for_topup_rubles)
     await message.answer(
-        "🍯 <b>Введите сумму в ₽, на которую хотите закупиться</b>\n"
-        "<i>(Минимальная сумма пополнения: 70 ₽)</i>",
+        "💳 <b>Введите сумму для пополнения в рублях (₽):</b>\n_(Например: 100)_",
         parse_mode="HTML",
         reply_markup=cancel_inline_keyboard()
     )
 
-@dp.message(Form.waiting_for_topup_rubles, F.text.isdigit())
+@router.message(Form.waiting_for_topup_rubles, F.text.isdigit())
 async def topup_process(message: types.Message, state: FSMContext):
     rubles = float(message.text)
-    
-    if rubles < 70:
-        await message.answer(
-            "❌ <b>Минимальная сумма пополнения — 70 ₽!</b>\n"
-            "Введите сумму от 70 и выше:",
-            parse_mode="HTML",
-            reply_markup=cancel_inline_keyboard()
-        )
+    if rubles <= 0:
+        await message.answer("❌ Сумма должна быть больше нуля.")
         return
 
     gold = round(rubles / GOLD_PRICE_PER_UNIT, 2)
@@ -266,11 +301,11 @@ async def topup_process(message: types.Message, state: FSMContext):
         reply_markup=builder.as_markup()
     )
 
-@dp.message(Form.waiting_for_topup_rubles)
+@router.message(Form.waiting_for_topup_rubles)
 async def topup_invalid_input(message: types.Message):
     await message.answer("❌ <b>Пожалуйста, введите сумму числом (например, 100):</b>", parse_mode="HTML", reply_markup=cancel_inline_keyboard())
 
-@dp.callback_query(F.data == "mock_pay")
+@router.callback_query(F.data == "mock_pay")
 async def mock_pay_handler(callback: types.CallbackQuery):
     await callback.message.answer(
         f"Для оплаты переведите средства и напишите оператору: {ADMIN_USERNAME}",
@@ -278,7 +313,7 @@ async def mock_pay_handler(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@dp.callback_query(F.data == "test_add_balance")
+@router.callback_query(F.data == "test_add_balance")
 async def test_add_balance_handler(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     gold_to_add = data.get("topup_gold", 100.0)
@@ -299,199 +334,24 @@ async def test_add_balance_handler(callback: types.CallbackQuery, state: FSMCont
 
 # --- ⭐ ВЫВОД ---
 
-@dp.message(F.text == "⭐ Вывести")
+@router.message(F.text == "⭐ Вывести")
 async def withdraw_start(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     balance = user_balances.get(user_id, 0.0)
-
-    if balance < 100:
-        await message.answer(
-            "❌ <b>Недостаточно голды для вывода!</b>\n\n"
-            f"Ваш текущий баланс: <b>{balance:.2f} G</b>\n"
-            "📦 Минимальная сумма для вывода: <b>100 G</b>.\n"
-            "Пополните баланс через раздел «💸 Пополнить».",
-            parse_mode="HTML",
-            reply_markup=cancel_inline_keyboard()
-        )
-        return
-
-    await state.set_state(Form.waiting_for_withdraw_gold)
+    
     await message.answer(
-        f"<b>Шаг 1 из 2:</b>\n"
-        f"Ваш баланс: <b>{balance:.2f} G</b>\n\n"
-        f"Введите количество голды для вывода (минимум 100 G):",
+        f"⭐ <b>Вывод голды</b>\n\n"
+        f"Ваш текущий баланс: <b>{balance:.2f} G</b>\n\n"
+        f"Для вывода средств обратитесь к оператору: {ADMIN_USERNAME}",
         parse_mode="HTML",
         reply_markup=cancel_inline_keyboard()
     )
 
-@dp.message(Form.waiting_for_withdraw_gold, F.text.isdigit())
-async def withdraw_gold_step(message: types.Message, state: FSMContext):
-    amount = float(message.text)
-    user_id = message.from_user.id
-    balance = user_balances.get(user_id, 0.0)
-
-    if amount < 100:
-        await message.answer(
-            "❌ <b>Минимальная сумма вывода — 100 G!</b>\n"
-            "Введите сумму от 100 и выше:",
-            parse_mode="HTML",
-            reply_markup=cancel_inline_keyboard()
-        )
-        return
-
-    if amount > balance:
-        await message.answer(
-            f"❌ Вы не можете вывести больше, чем у вас есть!\n"
-            f"Ваш баланс: <b>{balance:.2f} G</b>. Введите меньшую сумму:",
-            parse_mode="HTML",
-            reply_markup=cancel_inline_keyboard()
-        )
-        return
-
-    base_price = amount * 1.25
-    random_cents = round(random.uniform(0.01, 0.09), 2)
-    price_with_commission = round(base_price + random_cents, 2)
-
-    await state.update_data(withdraw_amount=amount, market_price=price_with_commission)
-    await state.set_state(Form.waiting_for_withdraw_photo)
-
-    caption_text = (
-        f"<b>Шаг 2 из 2: Инструкция по выставлению</b>\n\n"
-        f"1. Зайдите в Standoff 2 на рынок.\n"
-        f"2. Найдите скин: <b>UMP45 \"Arid\"</b>\n"
-        f"3. Выставьте его на продажу ровно за: <b>{price_with_commission} G</b>\n"
-        f"<i>(Вы получите чистыми {amount:.0f} G с учетом комиссии рынка)</i>\n\n"
-        f"📸 После этого отправьте <b>скриншот</b> выставленного скина сюда:"
-    )
-
-    if SKIN_PHOTO_ID:
-        try:
-            await message.answer_photo(
-                photo=SKIN_PHOTO_ID,
-                caption=caption_text,
-                parse_mode="HTML",
-                reply_markup=cancel_inline_keyboard()
-            )
-        except Exception:
-            await message.answer(caption_text, parse_mode="HTML", reply_markup=cancel_inline_keyboard())
-    else:
-        await message.answer(caption_text, parse_mode="HTML", reply_markup=cancel_inline_keyboard())
-
-@dp.message(Form.waiting_for_withdraw_gold)
-async def withdraw_invalid_input(message: types.Message):
-    await message.answer("❌ <b>Пожалуйста, введите число голды для вывода:</b>", parse_mode="HTML", reply_markup=cancel_inline_keyboard())
-
-@dp.message(Form.waiting_for_withdraw_photo, F.photo)
-async def withdraw_photo_step(message: types.Message, state: FSMContext):
-    global SKIN_PHOTO_ID
-    if not SKIN_PHOTO_ID:
-        SKIN_PHOTO_ID = message.photo[-1].file_id
-
-    data = await state.get_data()
-    photo_id = message.photo[-1].file_id
-    user = message.from_user
-    amount = float(data.get('withdraw_amount', 0))
-    market_price = data.get('market_price', 0)
-
-    if amount > 0:
-        user_balances[user.id] = round(user_balances.get(user.id, 0.0) - amount, 2)
-        new_balance = user_balances[user.id]
-
-        await message.answer(
-            "✅ <b>Заявка на вывод успешно отправлена!</b>\n\n"
-            f"Списано с баланса: <b>{amount:.0f} G</b>\n"
-            f"Остаток на балансе: <b>{new_balance:.2f} G</b>\n\n"
-            "Оператор выкупит ваш скин в ближайшее время.",
-            parse_mode="HTML",
-            reply_markup=main_keyboard()
-        )
-
-        admin_text = (
-            f"🚨 <b>НОВАЯ ЗАЯВКА НА ВЫКУП!</b>\n\n"
-            f"👤 Покупатель: @{user.username or 'нет_юзернейма'} (ID: <code>{user.id}</code>)\n"
-            f"💰 Вывод чистыми: <b>{amount:.0f} G</b>\n"
-            f"🎯 Скин: <b>UMP45 \"Arid\"</b>\n"
-            f"🏷 Выставлен за уникальную цену: <b>{market_price} G</b>"
-        )
-
-        try:
-            await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_text, parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Ошибка при отправке заявки админу: {e}")
-
-        await state.clear()
-
-        await message.answer(
-            "⭐ <b>Пожалуйста, оцените качество обслуживания:</b>\n"
-            "Ваша оценка помогает нам становиться лучше!",
-            parse_mode="HTML",
-            reply_markup=rating_inline_keyboard()
-        )
-
-
-# --- 📝 ОЦЕНКИ И ОТЗЫВЫ ---
-
-@dp.callback_query(F.data.startswith("rate_"))
-async def process_rating(callback: types.CallbackQuery, state: FSMContext):
-    rate_val = callback.data.split("_")[1]
-
-    if rate_val == "skip":
-        await callback.message.edit_text("Спасибо за покупку! Ждем вас снова! 😉")
-        await callback.answer()
-        return
-
-    rating = int(rate_val)
-    await state.update_data(review_rating=rating)
-    await state.set_state(Form.waiting_for_review_comment)
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Пропустить комментарий ➡️", callback_data="skip_comment")
-
-    await callback.message.edit_text(
-        f"Вы поставили: <b>{rating} ⭐</b>\n\n"
-        "✍️ **Напишите ваш отзыв или комментарий к покупке** (или нажмите кнопку ниже, чтобы пропустить):",
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
-    await callback.answer()
-
-@dp.message(Form.waiting_for_review_comment, F.text)
-async def process_review_comment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    rating = data.get("review_rating", 5)
-    comment = message.text
-    user = message.from_user
-
-    reviews_list.append({
-        "rating": rating,
-        "text": comment,
-        "user": user.username or user.first_name
-    })
-
-    await message.answer("🎉 **Спасибо за ваш отзыв! Нам очень приятно.**", parse_mode="Markdown")
-    await state.clear()
-
-@dp.callback_query(F.data == "skip_comment")
-async def skip_comment_handler(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    rating = data.get("review_rating", 5)
-    user = callback.from_user
-
-    reviews_list.append({
-        "rating": rating,
-        "text": "Без комментария",
-        "user": user.username or user.first_name
-    })
-
-    await callback.message.edit_text("🎉 **Спасибо за вашу оценку!**", parse_mode="Markdown")
-    await state.clear()
-    await callback.answer()
-
 
 # --- ℹ️ О БОТЕ И ОСТАЛЬНЫЕ КНОПКИ ---
 
-@dp.message(F.text == "ℹ️ О боте")
+@router.message(F.text == "ℹ️ О боте")
 async def about_handler(message: types.Message, state: FSMContext):
     await state.clear()
     total_reviews = len(reviews_list)
@@ -506,7 +366,7 @@ async def about_handler(message: types.Message, state: FSMContext):
     )
     await message.answer(text, parse_mode="HTML", reply_markup=cancel_inline_keyboard())
 
-@dp.message(F.text == "🧮 Калькулятор")
+@router.message(F.text == "🧮 Калькулятор")
 async def calc_menu_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -515,13 +375,13 @@ async def calc_menu_start(message: types.Message, state: FSMContext):
         reply_markup=calc_keyboard()
     )
 
-@dp.message(F.text == "💰 Посчитать ₽ в G")
+@router.message(F.text == "💰 Посчитать ₽ в G")
 async def calc_rubles_start(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(Form.waiting_for_calc_rubles)
     await message.answer("💳 **Введите сумму в рублях (₽):**\n_(Например: 150)_", parse_mode="Markdown")
 
-@dp.message(Form.waiting_for_calc_rubles, F.text.isdigit())
+@router.message(Form.waiting_for_calc_rubles, F.text.isdigit())
 async def calc_rubles_process(message: types.Message, state: FSMContext):
     rubles = float(message.text)
     gold = round(rubles / GOLD_PRICE_PER_UNIT, 2)
@@ -532,13 +392,13 @@ async def calc_rubles_process(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-@dp.message(F.text == "⭐ Посчитать G в ₽")
+@router.message(F.text == "⭐ Посчитать G в ₽")
 async def calc_gold_start(message: types.Message, state: FSMContext):
     await state.clear()
     await state.set_state(Form.waiting_for_calc_gold)
     await message.answer("🪙 **Введите количество голды (G):**\n_(Например: 500)_", parse_mode="Markdown")
 
-@dp.message(Form.waiting_for_calc_gold, F.text.isdigit())
+@router.message(Form.waiting_for_calc_gold, F.text.isdigit())
 async def calc_gold_process(message: types.Message, state: FSMContext):
     gold = int(message.text)
     rubles = round(gold * GOLD_PRICE_PER_UNIT, 2)
@@ -550,33 +410,30 @@ async def calc_gold_process(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-@dp.message(F.text == "🛍️ Каталог")
-async def catalog_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("📦 Воспользуйтесь кнопкой «💸 Пополнить» для покупки голды!", reply_markup=cancel_inline_keyboard())
-
-@dp.message(F.text == "👨‍💻 Поддержка")
+@router.message(F.text == "👨‍💻 Поддержка")
 async def support_handler(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"По всем вопросам обращайтесь к оператору: {ADMIN_USERNAME}", reply_markup=cancel_inline_keyboard())
 
-@dp.message(F.text == "🎯 Халява")
+@router.message(F.text == "🎯 Халява")
 async def bonus_handler(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🎁 Раздел промокодов и бонусов временно пуст.", reply_markup=cancel_inline_keyboard())
 
-@dp.message(F.text == "🎮 Сменить игру")
+@router.message(F.text == "🎮 Сменить игру")
 async def change_game_handler(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("На данный момент доступна только игра **Standoff 2**.", reply_markup=cancel_inline_keyboard())
+    await message.answer("На данный момент доступна только игра **Standoff 2**.", parse_mode="HTML", reply_markup=cancel_inline_keyboard())
 
 
 # --- ЗАПУСК ---
 
 async def main():
+    dp.include_router(router)
+    await bot.delete_webhook(drop_pending_updates=True)
     print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
+    
