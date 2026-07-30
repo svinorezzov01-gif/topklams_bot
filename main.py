@@ -1,4 +1,25 @@
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+# ... здесь твои остальные импорты (aiogram и т.д.) ...
+
+# 1. Заглушка для веб-порта Render
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is active!")
+
+def run_server():
+    server = HTTPServer(('0.0.0.0', 10000), SimpleHandler)
+    server.serve_forever()
+
+# Запускаем сервер в фоне
+threading.Thread(target=run_server, daemon=True).start()
+
+# 2. Дальше идет твой основной код бота (создание бота, диспетчера и dp.start_polling)
+
+import asyncio
 import logging
 import os
 import random
