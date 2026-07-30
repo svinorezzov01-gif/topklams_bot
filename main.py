@@ -25,15 +25,14 @@ threading.Thread(target=run_server, daemon=True).start()
 
 # --- НАСТРОЙКИ БОТА ---
 TOKEN = "8664043627:AAFLw6hUlv1YPI6Ef7aiegEYFG-lpWf-hvA"  # Вставь сюда свой токен от BotFather
-ADMIN_ID = 8836199481  # Впиши сюда свой цифровой Telegram ID для получения уведомлений по голде
+ADMIN_ID = 8836199481  # Впиши сюда свой цифровой Telegram ID для уведомлений
 ADMIN_USERNAME = "@topklamsmanager"  # Менеджер для связи
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# Курс и базы данных в памяти
-GOLD_PRICE_PER_UNIT = 0.7  # Примерный коэффициент для калькулятора (руб за 1 голду)
+GOLD_PRICE_PER_UNIT = 0.7  
 user_balances = {}
 reviews_list = []
 
@@ -49,9 +48,10 @@ class Form(StatesGroup):
 def main_keyboard():
     kb = [
         [types.KeyboardButton(text="🛍️ Каталог"), types.KeyboardButton(text="💸 Пополнить")],
-        [types.KeyboardButton(text="⭐ Вывести"), types.KeyboardButton(text="🧮 Калькулятор")],
-        [types.KeyboardButton(text="ℹ️ О боте"), types.KeyboardButton(text="👨‍💻 Поддержка")],
-        [types.KeyboardButton(text="🎯 Халява"), types.KeyboardButton(text="🎮 Сменить игру")]
+        [types.KeyboardButton(text="⭐ Вывести"), types.KeyboardButton(text="👤 Профиль")],
+        [types.KeyboardButton(text="🧮 Калькулятор"), types.KeyboardButton(text="👨‍💻 Поддержка")],
+        [types.KeyboardButton(text="ℹ️ О боте"), types.KeyboardButton(text="🎯 Халява")],
+        [types.KeyboardButton(text="🎮 Сменить игру")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -67,7 +67,7 @@ def calc_keyboard():
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Список товаров и цен со скриншота
+# Каталог товаров со скриншота
 PRODUCTS = {
     "pos_10": {"name": "💎 Чек позиций на 10 секунд", "rub": 50, "gold": 100},
     "klams_2": {"name": "💎 Кламси на 2 секунды", "rub": 70, "gold": 140},
@@ -80,7 +80,7 @@ PRODUCTS = {
 }
 
 
-# --- СТАРТ И ГЛАВНОЕ МЕНЮ ---
+# --- СТАРТ И МЕНЮ ---
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -101,6 +101,23 @@ async def go_main_menu_callback(callback: types.CallbackQuery, state: FSMContext
 async def go_main_menu_text(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🏠 Главное меню:", reply_markup=main_keyboard())
+
+
+# --- 👤 ПРОФИЛЬ ---
+
+@router.message(F.text == "👤 Профиль")
+async def profile_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+    user = message.from_user
+    balance = user_balances.get(user.id, 0.0)
+    
+    text = (
+        "👤 <b>Ваш профиль:</b>\n\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"👤 Имя: {user.first_name}\n"
+        f"💰 Ваш баланс: <b>{balance:.2f} G</b>"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=main_keyboard())
 
 
 # --- 🛍️ КАТАЛОГ И ПОКУПКА ---
@@ -162,22 +179,19 @@ async def back_to_catalog(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Оплата голдой (запрос на отправку скина админом)
+# Оплата голдой
 @router.callback_query(F.data.startswith("pay_gold_"))
 async def pay_gold_handler(callback: CallbackQuery, state: FSMContext):
     product_key = callback.data.split("_", 2)[2]
     item = PRODUCTS.get(product_key)
     user = callback.from_user
     
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🛍️ В каталог", callback_data="back_to_catalog")
-    
     await callback.message.edit_text(
         f"🟡 Вы выбрали оплату голдой за <b>{item['name']}</b> ({item['gold']} G).\n\n"
         f"⏳ Заявка отправлена менеджеру. Скоро вам пришлют скриншот скина для покупки.\n"
         f"Связь с менеджером: {ADMIN_USERNAME}",
         parse_mode="HTML",
-        reply_markup=builder.as_markup()
+        reply_markup=cancel_inline_keyboard()
     )
     
     if ADMIN_ID != 0:
@@ -193,7 +207,7 @@ async def pay_gold_handler(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
-# Админ нажимает кнопку прикрепить фото скина
+# Админ прикрепляет фото скина
 @router.callback_query(F.data.startswith("send_skin_"))
 async def admin_start_send_skin(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
@@ -203,10 +217,9 @@ async def admin_start_send_skin(callback: CallbackQuery, state: FSMContext):
     await state.update_data(buyer_id=int(buyer_id), gold_amount=gold_amount)
     await state.set_state(Form.waiting_for_skin_photo)
     
-    await callback.message.answer("📸 Отправьте **фотографию скина** (картинкой), который покупатель должен выставить на рынок для оплаты голдой:")
+    await callback.message.answer("📸 Отправьте **фотографию скина** (картинкой), который покупатель должен выставить на рынок:")
     await callback.answer()
 
-# Админ отправляет фото — бот пересылает покупателю
 @router.message(Form.waiting_for_skin_photo, F.photo)
 async def admin_send_skin_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -235,7 +248,7 @@ async def admin_send_skin_photo(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# Оплата рублями (Инвойс Telegram Payments)
+# Оплата рублями
 @router.callback_query(F.data.startswith("pay_rub_"))
 async def pay_rub_handler(callback: CallbackQuery):
     product_key = callback.data.split("_", 2)[2]
@@ -247,7 +260,7 @@ async def pay_rub_handler(callback: CallbackQuery):
         title=item['name'],
         description=f"Покупка позиции {item['name']} в боте Top Klams",
         payload=f"buy_{product_key}",
-        provider_token="",  # Укажите токен провайдера, если подключена реальная оплата
+        provider_token="",
         currency="RUB",
         prices=[LabeledPrice(label=item['name'], amount=price_in_kopecks)]
     )
@@ -349,7 +362,7 @@ async def withdraw_start(message: types.Message, state: FSMContext):
     )
 
 
-# --- ℹ️ О БОТЕ И ОСТАЛЬНЫЕ КНОПКИ ---
+# --- ℹ️ О БОТЕ И ОСТАЛЬНОЕ ---
 
 @router.message(F.text == "ℹ️ О боте")
 async def about_handler(message: types.Message, state: FSMContext):
@@ -436,4 +449,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+        
