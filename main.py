@@ -33,7 +33,7 @@ dp = Dispatcher()
 router = Router()
 
 # Курс и базы данных в памяти
-GOLD_PRICE_PER_UNIT = 0.5  # Примерный коэффициент для калькулятора (руб за 1 голду)
+GOLD_PRICE_PER_UNIT = 0.7  # Примерный коэффициент для калькулятора (руб за 1 голду)
 user_balances = {}
 reviews_list = []
 
