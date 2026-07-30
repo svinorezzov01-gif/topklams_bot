@@ -24,8 +24,8 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # --- НАСТРОЙКИ БОТА ---
-TOKEN = "ТВОЙ_ТОКЕН_БОТА"  # Вставь сюда свой токен от BotFather
-ADMIN_ID = 000000000  # Впиши сюда свой цифровой Telegram ID для получения уведомлений по голде
+TOKEN = "8664043627:AAFLw6hUlv1YPI6Ef7aiegEYFG-lpWf-hvA"  # Вставь сюда свой токен от BotFather
+ADMIN_ID = 8836199481  # Впиши сюда свой цифровой Telegram ID для получения уведомлений по голде
 ADMIN_USERNAME = "@topklamsmanager"  # Менеджер для связи
 
 bot = Bot(token=TOKEN)
